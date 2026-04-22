@@ -20,51 +20,57 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: 'user_id is required' });
     }
 
-    // -----------------------------
-    // 1. Get Auth Token (Josys)
-    // -----------------------------
-   const authRes = await fetch(
-  'https://developer.josys.it/api/v1/oauth/tokens',
-  {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    },
-    body: JSON.stringify({
-      grant_type: 'client_credentials',
-      api_user_key: process.env.JOSYS_API_KEY || "431fbec66bd254f7",
-      api_user_secret: process.env.JOSYS_API_SECRET || "d11891D41285@D68a3746A1BD7fAA7cb"
-    })
-  }
-);
-
-// 🔥 ADD THIS
-const rawText = await authRes.text();
-console.log("AUTH STATUS:", authRes.status);
-console.log("AUTH RESPONSE RAW:", rawText);
-
-// THEN parse safely
-let authData;
-try {
-  authData = JSON.parse(rawText);
-} catch (e) {
-  throw new Error("Auth response is not JSON");
-}
-
-const token = authData.access_token;
-
-if (!token) {
-  throw new Error("No access_token in response");
-}
+    console.log("START: user_id =", user_id);
 
     // -----------------------------
-    // 2. Loop through users (pagination)
+    // 1. Get Auth Token
+    // -----------------------------
+    const authRes = await fetch(
+      'https://developer.josys.it/api/v1/oauth/tokens',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          grant_type: 'client_credentials',
+          api_user_key: process.env.JOSYS_API_KEY || "431fbec66bd254f7",
+          api_user_secret: process.env.JOSYS_API_SECRET || "d11891D41285@D68a3746A1BD7fAA7cb"
+        })
+      }
+    );
+
+    const rawText = await authRes.text();
+    console.log("AUTH STATUS:", authRes.status);
+    console.log("AUTH RAW:", rawText);
+
+    let authData;
+    try {
+      authData = JSON.parse(rawText);
+    } catch (e) {
+      throw new Error("Auth response is not JSON");
+    }
+
+    // 🔥 FIX HERE
+    const token = authData.id_token;
+
+    if (!token) {
+      throw new Error(`No token in response: ${rawText}`);
+    }
+
+    console.log("TOKEN OK");
+
+    // -----------------------------
+    // 2. Find user via pagination
     // -----------------------------
     let foundUser = null;
     let page = 1;
+    const maxPages = 5; // prevent timeout
 
-    while (!foundUser) {
+    while (!foundUser && page <= maxPages) {
+      console.log("FETCH PAGE:", page);
+
       const listRes = await fetch(
         `https://developer.josys.it/api/v2/user_profiles?per_page=100&page=${page}`,
         {
@@ -75,18 +81,23 @@ if (!token) {
         }
       );
 
-      const listData = await listRes.json();
+      const listText = await listRes.text();
+      console.log("LIST RAW:", listText.slice(0, 300));
 
-      if (!listData.data || listData.data.length === 0) {
-        break; // no more data
+      let listData;
+      try {
+        listData = JSON.parse(listText);
+      } catch (e) {
+        throw new Error("List response not JSON");
       }
 
-      // match user_id safely
+      if (!listData.data || listData.data.length === 0) {
+        break;
+      }
+
       foundUser = listData.data.find(
         (u) => u.user_id && u.user_id === user_id
       );
-
-      if (foundUser) break;
 
       page++;
     }
@@ -95,13 +106,13 @@ if (!token) {
       return res.status(404).json({ error: 'User not found in Josys' });
     }
 
-    const uuid = foundUser.uuid;
+    console.log("FOUND USER:", foundUser.uuid);
 
     // -----------------------------
     // 3. Get user detail
     // -----------------------------
     const detailRes = await fetch(
-      `https://developer.josys.it/api/v2/user_profiles/${uuid}`,
+      `https://developer.josys.it/api/v2/user_profiles/${foundUser.uuid}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -110,7 +121,20 @@ if (!token) {
       }
     );
 
-    const detailData = await detailRes.json();
+    const detailText = await detailRes.text();
+    console.log("DETAIL RAW:", detailText.slice(0, 300));
+
+    let detailData;
+    try {
+      detailData = JSON.parse(detailText);
+    } catch (e) {
+      throw new Error("Detail response not JSON");
+    }
+
+    if (!detailData.data) {
+      throw new Error("Invalid detail response");
+    }
+
     const u = detailData.data;
 
     // -----------------------------
@@ -122,6 +146,8 @@ if (!token) {
     // -----------------------------
     // 5. Insert into Supabase
     // -----------------------------
+    console.log("INSERTING TO SUPABASE");
+
     const { error } = await supabase
       .from('requests')
       .insert([
@@ -154,18 +180,18 @@ if (!token) {
       throw error;
     }
 
-    // -----------------------------
-    // 6. Success response
-    // -----------------------------
+    console.log("SUCCESS");
+
     return res.status(200).json({
       status: 'success',
-      message: 'User synced successfully',
       uuid: u.uuid
     });
 
   } catch (err) {
+    console.error("FULL ERROR:", err);
+
     return res.status(500).json({
       error: err.message
     });
   }
-}
+};
