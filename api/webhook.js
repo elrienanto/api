@@ -175,30 +175,32 @@ module.exports = async function handler(req, res) {
     const { error } = await supabase
       .from('requests')
       .insert([
-        {
-          employee_id: u.uuid,
-          first_name: u.first_name,
-          last_name: u.last_name,
-          email: u.email,
-          employment_status: u.status,
-          title: u.job_title,
-          start_date: u.start_date,
-          end_date: u.end_date,
-          memo: null,
-          location_code: u.work_location_code,
-          username: u.username,
-          personal_email: u.personal_email,
-          member_type: u.role || null,
-          department: u.department_uuids?.[0] || null,
+  {
+    user_id: user_id, // 🔥 ADD THIS
 
-          kewarganegaraan: getCustom('Kewarganegaraan'),
-          tipe_identitas: getCustom('Tipe Identitas'),
-          nomor_identitas: getCustom('Nomor Identitas'),
-          tempat_lahir: getCustom('Tempat Lahir'),
-          tanggal_lahir: getCustom('Tanggal Lahir'),
-          status_wajib_pajak: getCustom('Status Wajib Pajak')
-        }
-      ]);
+    employee_id: u.uuid,
+    first_name: u.first_name,
+    last_name: u.last_name,
+    email: u.email,
+    employment_status: u.status,
+    title: u.job_title,
+    start_date: u.start_date,
+    end_date: u.end_date,
+    memo: null,
+    location_code: u.work_location_code,
+    username: u.username,
+    personal_email: u.personal_email,
+    member_type: u.role || null,
+    department: u.department_uuids?.[0] || null,
+
+    kewarganegaraan: getCustom('Kewarganegaraan'),
+    tipe_identitas: getCustom('Tipe Identitas'),
+    nomor_identitas: getCustom('Nomor Identitas'),
+    tempat_lahir: getCustom('Tempat Lahir'),
+    tanggal_lahir: getCustom('Tanggal Lahir'),
+    status_wajib_pajak: getCustom('Status Wajib Pajak')
+  }
+]);
 
     if (error) {
       throw error;
