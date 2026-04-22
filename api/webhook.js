@@ -14,13 +14,15 @@ module.exports = async function handler(req, res) {
       return res.status(405).json({ message: 'Method not allowed' });
     }
 
-    const { user_id } = req.body;
+    const { user_id, email } = req.body;
 
-    if (!user_id) {
-      return res.status(400).json({ error: 'user_id is required' });
+    if (!user_id && !email) {
+      return res.status(400).json({
+        error: 'user_id or email is required'
+      });
     }
 
-    console.log("START: user_id =", user_id);
+    console.log("START:", { user_id, email });
 
     // -----------------------------
     // 1. Get Auth Token
@@ -41,78 +43,107 @@ module.exports = async function handler(req, res) {
       }
     );
 
-    const rawText = await authRes.text();
-    console.log("AUTH STATUS:", authRes.status);
-    console.log("AUTH RAW:", rawText);
+    const authText = await authRes.text();
+    console.log("AUTH RAW:", authText);
 
-    let authData;
+    let authData = {};
     try {
-      authData = JSON.parse(rawText);
-    } catch (e) {
-      throw new Error("Auth response is not JSON");
+      authData = JSON.parse(authText);
+    } catch {
+      throw new Error("Auth response not JSON");
     }
 
-    // 🔥 FIX HERE
     const token = authData.id_token;
 
     if (!token) {
-      throw new Error(`No token in response: ${rawText}`);
+      throw new Error(`No token in response: ${authText}`);
     }
 
     console.log("TOKEN OK");
 
     // -----------------------------
-    // 2. Find user via pagination
+    // 2. Search user (user_id first)
     // -----------------------------
     let foundUser = null;
-    let page = 1;
-    const maxPages = 5; // prevent timeout
 
-    while (!foundUser && page <= maxPages) {
-      console.log("FETCH PAGE:", page);
-
-      const listRes = await fetch(
-        `https://developer.josys.it/api/v2/user_profiles?per_page=100&page=${page}`,
+    if (user_id) {
+      const resUser = await fetch(
+        'https://developer.josys.it/api/v2/user_profiles/search',
         {
+          method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
-            Accept: 'application/json'
-          }
+            Accept: 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            user_id: {
+              operator: "equals",
+              value: user_id
+            }
+          })
         }
       );
 
-      const listText = await listRes.text();
-      console.log("LIST RAW:", listText.slice(0, 300));
+      const text = await resUser.text();
+      console.log("SEARCH user_id RAW:", text);
 
-      let listData;
-      try {
-        listData = JSON.parse(listText);
-      } catch (e) {
-        throw new Error("List response not JSON");
+      const data = JSON.parse(text);
+      if (data.data && data.data.length > 0) {
+        foundUser = data.data[0];
       }
+    }
 
-      if (!listData.data || listData.data.length === 0) {
-        break;
-      }
+    // -----------------------------
+    // 3. Fallback: search by email
+    // -----------------------------
+    if (!foundUser && email) {
+      console.log("FALLBACK EMAIL SEARCH");
 
-      foundUser = listData.data.find(
-        (u) => u.user_id && u.user_id === user_id
+      const resEmail = await fetch(
+        'https://developer.josys.it/api/v2/user_profiles/search',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            email: {
+              operator: "equals",
+              value: email
+            }
+          })
+        }
       );
 
-      page++;
-    }
+      const text = await resEmail.text();
+      console.log("SEARCH email RAW:", text);
 
-    if (!foundUser) {
-      return res.status(404).json({ error: 'User not found in Josys' });
+      const data = JSON.parse(text);
+      if (data.data && data.data.length > 0) {
+        foundUser = data.data[0];
+      }
     }
-
-    console.log("FOUND USER:", foundUser.uuid);
 
     // -----------------------------
-    // 3. Get user detail
+    // 4. Not found
+    // -----------------------------
+    if (!foundUser) {
+      return res.status(404).json({
+        error: 'User not found via user_id or email'
+      });
+    }
+
+    const uuid = foundUser.uuid;
+    console.log("FOUND UUID:", uuid);
+
+    // -----------------------------
+    // 5. Get full user detail
     // -----------------------------
     const detailRes = await fetch(
-      `https://developer.josys.it/api/v2/user_profiles/${foundUser.uuid}`,
+      `https://developer.josys.it/api/v2/user_profiles/${uuid}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -124,12 +155,7 @@ module.exports = async function handler(req, res) {
     const detailText = await detailRes.text();
     console.log("DETAIL RAW:", detailText.slice(0, 300));
 
-    let detailData;
-    try {
-      detailData = JSON.parse(detailText);
-    } catch (e) {
-      throw new Error("Detail response not JSON");
-    }
+    const detailData = JSON.parse(detailText);
 
     if (!detailData.data) {
       throw new Error("Invalid detail response");
@@ -138,16 +164,14 @@ module.exports = async function handler(req, res) {
     const u = detailData.data;
 
     // -----------------------------
-    // 4. Helper for custom fields
+    // 6. Helper (custom fields)
     // -----------------------------
     const getCustom = (name) =>
-      u.custom_fields?.find((f) => f.name === name)?.value || null;
+      u.custom_fields?.find(f => f.name === name)?.value || null;
 
     // -----------------------------
-    // 5. Insert into Supabase
+    // 7. Insert into Supabase
     // -----------------------------
-    console.log("INSERTING TO SUPABASE");
-
     const { error } = await supabase
       .from('requests')
       .insert([
@@ -180,11 +204,11 @@ module.exports = async function handler(req, res) {
       throw error;
     }
 
-    console.log("SUCCESS");
+    console.log("SUCCESS INSERT");
 
     return res.status(200).json({
       status: 'success',
-      uuid: u.uuid
+      uuid
     });
 
   } catch (err) {
