@@ -6,10 +6,9 @@ const supabase = createClient(
 );
 
 module.exports = async function handler(req, res) {
+  let recordId = null;
+
   try {
-    // -----------------------------
-    // 0. Validate request
-    // -----------------------------
     if (req.method !== 'POST') {
       return res.status(405).json({ message: 'Method not allowed' });
     }
@@ -22,10 +21,25 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    console.log("START:", { user_id, email });
+    // -----------------------------
+    // 1. Create initial record (PROCESSING)
+    // -----------------------------
+    const { data: insertData, error: insertError } = await supabase
+      .from('requests')
+      .insert([
+        {
+          user_id: user_id || null,
+          status: 'processing'
+        }
+      ])
+      .select();
+
+    if (insertError) throw insertError;
+
+    recordId = insertData[0].id;
 
     // -----------------------------
-    // 1. Get Auth Token
+    // 2. Josys Auth
     // -----------------------------
     const authRes = await fetch(
       'https://developer.josys.it/api/v1/oauth/tokens',
@@ -37,184 +51,175 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify({
           grant_type: 'client_credentials',
-          api_user_key: process.env.JOSYS_API_KEY
+          api_user_key: process.env.JOSYS_API_KEY,
           api_user_secret: process.env.JOSYS_API_SECRET
         })
       }
     );
 
-    const authText = await authRes.text();
-    console.log("AUTH RAW:", authText);
+    const authData = await authRes.json();
+    const josysToken = authData.id_token;
 
-    let authData = {};
-    try {
-      authData = JSON.parse(authText);
-    } catch {
-      throw new Error("Auth response not JSON");
-    }
-
-    const token = authData.id_token;
-
-    if (!token) {
-      throw new Error(`No token in response: ${authText}`);
-    }
-
-    console.log("TOKEN OK");
+    if (!josysToken) throw new Error("Josys auth failed");
 
     // -----------------------------
-    // 2. Search user (user_id first)
+    // 3. Search user
     // -----------------------------
     let foundUser = null;
 
-    if (user_id) {
-      const resUser = await fetch(
-        'https://developer.josys.it/api/v2/user_profiles/search',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/json',
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            user_id: {
-              operator: "equals",
-              value: user_id
-            }
-          })
-        }
-      );
+    const searchBody = user_id
+      ? { user_id: { operator: "equals", value: user_id } }
+      : { email: { operator: "equals", value: email } };
 
-      const text = await resUser.text();
-      console.log("SEARCH user_id RAW:", text);
-
-      const data = JSON.parse(text);
-      if (data.data && data.data.length > 0) {
-        foundUser = data.data[0];
+    const searchRes = await fetch(
+      'https://developer.josys.it/api/v2/user_profiles/search',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${josysToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(searchBody)
       }
+    );
+
+    const searchData = await searchRes.json();
+
+    if (searchData.data?.length > 0) {
+      foundUser = searchData.data[0];
     }
 
-    // -----------------------------
-    // 3. Fallback: search by email
-    // -----------------------------
-    if (!foundUser && email) {
-      console.log("FALLBACK EMAIL SEARCH");
-
-      const resEmail = await fetch(
-        'https://developer.josys.it/api/v2/user_profiles/search',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/json',
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            email: {
-              operator: "equals",
-              value: email
-            }
-          })
-        }
-      );
-
-      const text = await resEmail.text();
-      console.log("SEARCH email RAW:", text);
-
-      const data = JSON.parse(text);
-      if (data.data && data.data.length > 0) {
-        foundUser = data.data[0];
-      }
-    }
+    if (!foundUser) throw new Error("User not found");
 
     // -----------------------------
-    // 4. Not found
-    // -----------------------------
-    if (!foundUser) {
-      return res.status(404).json({
-        error: 'User not found via user_id or email'
-      });
-    }
-
-    const uuid = foundUser.uuid;
-    console.log("FOUND UUID:", uuid);
-
-    // -----------------------------
-    // 5. Get full user detail
+    // 4. Get detail
     // -----------------------------
     const detailRes = await fetch(
-      `https://developer.josys.it/api/v2/user_profiles/${uuid}`,
+      `https://developer.josys.it/api/v2/user_profiles/${foundUser.uuid}`,
       {
         headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json'
+          Authorization: `Bearer ${josysToken}`
         }
       }
     );
 
-    const detailText = await detailRes.text();
-    console.log("DETAIL RAW:", detailText.slice(0, 300));
-
-    const detailData = JSON.parse(detailText);
-
-    if (!detailData.data) {
-      throw new Error("Invalid detail response");
-    }
-
+    const detailData = await detailRes.json();
     const u = detailData.data;
 
-    // -----------------------------
-    // 6. Helper (custom fields)
-    // -----------------------------
     const getCustom = (name) =>
       u.custom_fields?.find(f => f.name === name)?.value || null;
 
     // -----------------------------
-    // 7. Insert into Supabase
+    // 5. Update DB with user data
     // -----------------------------
-    const { error } = await supabase
+    await supabase
       .from('requests')
-      .insert([
-  {
-    user_id: user_id, // 🔥 ADD THIS
+      .update({
+        employee_id: u.uuid,
+        first_name: u.first_name,
+        last_name: u.last_name,
+        email: u.email
+      })
+      .eq('id', recordId);
 
-    employee_id: u.uuid,
-    first_name: u.first_name,
-    last_name: u.last_name,
-    email: u.email,
-    employment_status: u.status,
-    title: u.job_title,
-    start_date: u.start_date,
-    end_date: u.end_date,
-    memo: null,
-    location_code: u.work_location_code,
-    username: u.username,
-    personal_email: u.personal_email,
-    member_type: u.role || null,
-    department: u.department_uuids?.[0] || null,
+    // -----------------------------
+    // 6. Gadjian Auth
+    // -----------------------------
+    const gadjianAuth = await fetch(
+      'https://developer.gadjian.com/v1/auth',
+      {
+        method: 'POST',
+        headers: {
+          Key: process.env.GADJIAN_KEY,
+          Secret: process.env.GADJIAN_SECRET
+        }
+      }
+    );
 
-    kewarganegaraan: getCustom('Kewarganegaraan'),
-    tipe_identitas: getCustom('Tipe Identitas'),
-    nomor_identitas: getCustom('Nomor Identitas'),
-    tempat_lahir: getCustom('Tempat Lahir'),
-    tanggal_lahir: getCustom('Tanggal Lahir'),
-    status_wajib_pajak: getCustom('Status Wajib Pajak')
-  }
-]);
+    const gadjianToken = gadjianAuth.headers.get('X-Access-Token');
 
-    if (error) {
-      throw error;
-    }
+    if (!gadjianToken) throw new Error("Gadjian auth failed");
 
-    console.log("SUCCESS INSERT");
+    // -----------------------------
+    // 7. Get NPWP
+    // -----------------------------
+    const npwpRes = await fetch(
+      'https://developer.gadjian.com/v1/company/npwp-pemotong',
+      {
+        headers: {
+          Authorization: `Bearer ${gadjianToken}`
+        }
+      }
+    );
+
+    const npwpData = await npwpRes.json();
+    const npwp = npwpData.data?.[0];
+
+    if (!npwp) throw new Error("NPWP not found");
+
+    // -----------------------------
+    // 8. Create employee
+    // -----------------------------
+    const createRes = await fetch(
+      'https://developer.gadjian.com/v1/employee',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${gadjianToken}`
+        },
+        body: JSON.stringify({
+          id_personalia: user_id,
+          nama: `${u.first_name} ${u.last_name}`,
+          tgl_mulai_kerja: u.start_date,
+          kewarganegaraan: getCustom('Kewarganegaraan') || "WNI",
+          tipe_identitas: getCustom('Tipe Identitas') || "KTP",
+          nomor_identitas: getCustom('Nomor Identitas') || "",
+          tempat_lahir: getCustom('Tempat Lahir') || "",
+          tgl_lahir: getCustom('Tanggal Lahir') || "",
+          email: u.email,
+          no_npwp: "0000000000000000",
+          status_pajak: getCustom('Status Wajib Pajak') || "TK0",
+          id_npwp_pemotong: npwp.id_npwp_pemotong,
+          id_nitku_pemotong: npwp.nitku_pemotong?.[0]?.id_nitku_pemotong
+        })
+      }
+    );
+
+    const gadjianResponse = await createRes.text();
+
+    // -----------------------------
+    // 9. FINAL SUCCESS UPDATE
+    // -----------------------------
+    await supabase
+      .from('requests')
+      .update({
+        status: 'success',
+        gadjian_status: createRes.ok ? 'success' : 'failed',
+        gadjian_response: gadjianResponse
+      })
+      .eq('id', recordId);
 
     return res.status(200).json({
       status: 'success',
-      uuid
+      gadjian_response: gadjianResponse
     });
 
   } catch (err) {
-    console.error("FULL ERROR:", err);
+    console.error(err);
+
+    // -----------------------------
+    // ERROR UPDATE
+    // -----------------------------
+    if (recordId) {
+      await supabase
+        .from('requests')
+        .update({
+          status: 'failed',
+          error_message: err.message
+        })
+        .eq('id', recordId);
+    }
 
     return res.status(500).json({
       error: err.message
