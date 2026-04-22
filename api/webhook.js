@@ -5,7 +5,7 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     // -----------------------------
     // 0. Validate request
