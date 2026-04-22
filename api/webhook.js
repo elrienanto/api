@@ -37,8 +37,8 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify({
           grant_type: 'client_credentials',
-          api_user_key: process.env.JOSYS_API_KEY || "431fbec66bd254f7",
-          api_user_secret: process.env.JOSYS_API_SECRET || "d11891D41285@D68a3746A1BD7fAA7cb"
+          api_user_key: process.env.JOSYS_API_KEY
+          api_user_secret: process.env.JOSYS_API_SECRET
         })
       }
     );
