@@ -7,6 +7,9 @@ const supabase = createClient(
 
 export default async function handler(req, res) {
   try {
+    // -----------------------------
+    // 0. Validate request
+    // -----------------------------
     if (req.method !== 'POST') {
       return res.status(405).json({ message: 'Method not allowed' });
     }
@@ -18,7 +21,7 @@ export default async function handler(req, res) {
     }
 
     // -----------------------------
-    // 1. Get Auth Token
+    // 1. Get Auth Token (Josys)
     // -----------------------------
     const authRes = await fetch(
       'https://developer.josys.it/api/v1/oauth/tokens',
@@ -44,86 +47,107 @@ export default async function handler(req, res) {
     }
 
     // -----------------------------
-    // 2. Get user list (page 1 for now)
+    // 2. Loop through users (pagination)
     // -----------------------------
-    const listRes = await fetch(
-      'https://developer.josys.it/api/v2/user_profiles?per_page=100',
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json'
+    let foundUser = null;
+    let page = 1;
+
+    while (!foundUser) {
+      const listRes = await fetch(
+        `https://developer.josys.it/api/v2/user_profiles?per_page=100&page=${page}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json'
+          }
         }
+      );
+
+      const listData = await listRes.json();
+
+      if (!listData.data || listData.data.length === 0) {
+        break; // no more data
       }
-    );
 
-    const listData = await listRes.json();
+      // match user_id safely
+      foundUser = listData.data.find(
+        (u) => u.user_id && u.user_id === user_id
+      );
 
-    // -----------------------------
-    // 3. Find matching user
-    // (TEMP: match by email or uuid depending on your input)
-    // -----------------------------
-    const user = listData.data.find(u => u.uuid === user_id);
+      if (foundUser) break;
 
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      page++;
     }
 
+    if (!foundUser) {
+      return res.status(404).json({ error: 'User not found in Josys' });
+    }
+
+    const uuid = foundUser.uuid;
+
     // -----------------------------
-    // 4. Get user detail
+    // 3. Get user detail
     // -----------------------------
     const detailRes = await fetch(
-      `https://developer.josys.it/api/v2/user_profiles/${user.uuid}`,
+      `https://developer.josys.it/api/v2/user_profiles/${uuid}`,
       {
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json'
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json'
         }
       }
     );
 
-    const detail = await detailRes.json();
-    const u = detail.data;
+    const detailData = await detailRes.json();
+    const u = detailData.data;
 
     // -----------------------------
-    // 5. Extract custom fields
+    // 4. Helper for custom fields
     // -----------------------------
     const getCustom = (name) =>
-      u.custom_fields?.find(f => f.name === name)?.value || null;
+      u.custom_fields?.find((f) => f.name === name)?.value || null;
 
     // -----------------------------
-    // 6. Insert into Supabase
+    // 5. Insert into Supabase
     // -----------------------------
     const { error } = await supabase
       .from('requests')
-      .insert([{
-        employee_id: u.uuid,
-        first_name: u.first_name,
-        last_name: u.last_name,
-        email: u.email,
-        employment_status: u.status,
-        title: u.job_title,
-        start_date: u.start_date,
-        end_date: u.end_date,
-        username: u.username,
-        personal_email: u.personal_email,
-        location_code: u.work_location_code,
-        department: u.department_uuids?.[0] || null,
+      .insert([
+        {
+          employee_id: u.uuid,
+          first_name: u.first_name,
+          last_name: u.last_name,
+          email: u.email,
+          employment_status: u.status,
+          title: u.job_title,
+          start_date: u.start_date,
+          end_date: u.end_date,
+          memo: null,
+          location_code: u.work_location_code,
+          username: u.username,
+          personal_email: u.personal_email,
+          member_type: u.role || null,
+          department: u.department_uuids?.[0] || null,
 
-        kewarganegaraan: getCustom('Kewarganegaraan'),
-        tipe_identitas: getCustom('Tipe Identitas'),
-        nomor_identitas: getCustom('Nomor Identitas'),
-        tempat_lahir: getCustom('Tempat Lahir'),
-        tanggal_lahir: getCustom('Tanggal Lahir'),
-        status_wajib_pajak: getCustom('Status Wajib Pajak')
-      }]);
+          kewarganegaraan: getCustom('Kewarganegaraan'),
+          tipe_identitas: getCustom('Tipe Identitas'),
+          nomor_identitas: getCustom('Nomor Identitas'),
+          tempat_lahir: getCustom('Tempat Lahir'),
+          tanggal_lahir: getCustom('Tanggal Lahir'),
+          status_wajib_pajak: getCustom('Status Wajib Pajak')
+        }
+      ]);
 
     if (error) {
       throw error;
     }
 
+    // -----------------------------
+    // 6. Success response
+    // -----------------------------
     return res.status(200).json({
       status: 'success',
-      message: 'User synced to Supabase',
+      message: 'User synced successfully',
       uuid: u.uuid
     });
 
