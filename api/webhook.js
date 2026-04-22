@@ -5,9 +5,19 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-module.exports = async function handler(req, res) {
-  let recordId = null;
+// helper
+const mapNationality = (val) => {
+  if (!val) return "WNI";
 
+  const v = val.toUpperCase();
+
+  if (v.includes("WNI") || v.includes("INDONESIA")) return "WNI";
+  if (v.includes("WNA") || v.includes("FOREIGN")) return "WNA";
+
+  return "WNI";
+};
+
+module.exports = async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
       return res.status(405).json({ message: 'Method not allowed' });
@@ -21,22 +31,27 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    console.log("START:", { user_id, email });
+
     // -----------------------------
-    // 1. Create initial record (PROCESSING)
+    // 1. UPSERT → always reset state
     // -----------------------------
-    const { data: insertData, error: insertError } = await supabase
+    const { data: upsertData, error: upsertError } = await supabase
       .from('requests')
-      .insert([
-        {
-          user_id: user_id || null,
-          status: 'processing'
-        }
-      ])
+      .upsert(
+        [{
+          user_id: user_id,
+          status: 'processing',
+          error_message: null,
+          gadjian_status: null,
+          gadjian_response: null,
+          updated_at: new Date()
+        }],
+        { onConflict: 'user_id' }
+      )
       .select();
 
-    if (insertError) throw insertError;
-
-    recordId = insertData[0].id;
+    if (upsertError) throw upsertError;
 
     // -----------------------------
     // 2. Josys Auth
@@ -60,7 +75,9 @@ module.exports = async function handler(req, res) {
     const authData = await authRes.json();
     const josysToken = authData.id_token;
 
-    if (!josysToken) throw new Error("Josys auth failed");
+    if (!josysToken) {
+      throw new Error("Josys auth failed");
+    }
 
     // -----------------------------
     // 3. Search user
@@ -89,10 +106,12 @@ module.exports = async function handler(req, res) {
       foundUser = searchData.data[0];
     }
 
-    if (!foundUser) throw new Error("User not found");
+    if (!foundUser) {
+      throw new Error("User not found in Josys");
+    }
 
     // -----------------------------
-    // 4. Get detail
+    // 4. Get user detail
     // -----------------------------
     const detailRes = await fetch(
       `https://developer.josys.it/api/v2/user_profiles/${foundUser.uuid}`,
@@ -106,11 +125,15 @@ module.exports = async function handler(req, res) {
     const detailData = await detailRes.json();
     const u = detailData.data;
 
+    if (!u) {
+      throw new Error("Invalid user detail response");
+    }
+
     const getCustom = (name) =>
       u.custom_fields?.find(f => f.name === name)?.value || null;
 
     // -----------------------------
-    // 5. Update DB with user data
+    // 5. UPDATE DB with latest data
     // -----------------------------
     await supabase
       .from('requests')
@@ -118,9 +141,22 @@ module.exports = async function handler(req, res) {
         employee_id: u.uuid,
         first_name: u.first_name,
         last_name: u.last_name,
-        email: u.email
+        email: u.email,
+        employment_status: u.status,
+        title: u.job_title,
+        start_date: u.start_date,
+        end_date: u.end_date,
+
+        kewarganegaraan: mapNationality(getCustom('Kewarganegaraan')),
+        tipe_identitas: getCustom('Tipe Identitas'),
+        nomor_identitas: getCustom('Nomor Identitas'),
+        tempat_lahir: getCustom('Tempat Lahir'),
+        tanggal_lahir: getCustom('Tanggal Lahir'),
+        status_wajib_pajak: getCustom('Status Wajib Pajak'),
+
+        updated_at: new Date()
       })
-      .eq('id', recordId);
+      .eq('user_id', user_id);
 
     // -----------------------------
     // 6. Gadjian Auth
@@ -138,7 +174,9 @@ module.exports = async function handler(req, res) {
 
     const gadjianToken = gadjianAuth.headers.get('X-Access-Token');
 
-    if (!gadjianToken) throw new Error("Gadjian auth failed");
+    if (!gadjianToken) {
+      throw new Error("Gadjian auth failed");
+    }
 
     // -----------------------------
     // 7. Get NPWP
@@ -155,7 +193,9 @@ module.exports = async function handler(req, res) {
     const npwpData = await npwpRes.json();
     const npwp = npwpData.data?.[0];
 
-    if (!npwp) throw new Error("NPWP not found");
+    if (!npwp) {
+      throw new Error("NPWP not found");
+    }
 
     // -----------------------------
     // 8. Create employee
@@ -172,7 +212,7 @@ module.exports = async function handler(req, res) {
           id_personalia: user_id,
           nama: `${u.first_name} ${u.last_name}`,
           tgl_mulai_kerja: u.start_date,
-          kewarganegaraan: getCustom('Kewarganegaraan') || "WNI",
+          kewarganegaraan: mapNationality(getCustom('Kewarganegaraan')),
           tipe_identitas: getCustom('Tipe Identitas') || "KTP",
           nomor_identitas: getCustom('Nomor Identitas') || "",
           tempat_lahir: getCustom('Tempat Lahir') || "",
@@ -189,16 +229,17 @@ module.exports = async function handler(req, res) {
     const gadjianResponse = await createRes.text();
 
     // -----------------------------
-    // 9. FINAL SUCCESS UPDATE
+    // 9. FINAL UPDATE
     // -----------------------------
     await supabase
       .from('requests')
       .update({
-        status: 'success',
+        status: createRes.ok ? 'success' : 'failed',
         gadjian_status: createRes.ok ? 'success' : 'failed',
-        gadjian_response: gadjianResponse
+        gadjian_response: gadjianResponse,
+        updated_at: new Date()
       })
-      .eq('id', recordId);
+      .eq('user_id', user_id);
 
     return res.status(200).json({
       status: 'success',
@@ -211,14 +252,15 @@ module.exports = async function handler(req, res) {
     // -----------------------------
     // ERROR UPDATE
     // -----------------------------
-    if (recordId) {
+    if (req.body?.user_id) {
       await supabase
         .from('requests')
         .update({
           status: 'failed',
-          error_message: err.message
+          error_message: err.message,
+          updated_at: new Date()
         })
-        .eq('id', recordId);
+        .eq('user_id', req.body.user_id);
     }
 
     return res.status(500).json({
