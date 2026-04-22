@@ -33,8 +33,8 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify({
           grant_type: 'client_credentials',
-          api_user_key: 431fbec66bd254f7,
-          api_user_secret: d11891D41285@D68a3746A1BD7fAA7cb
+          api_user_key: "431fbec66bd254f7",
+          api_user_secret: "d11891D41285@D68a3746A1BD7fAA7cb"
         })
       }
     );
