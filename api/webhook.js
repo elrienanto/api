@@ -23,28 +23,40 @@ module.exports = async function handler(req, res) {
     // -----------------------------
     // 1. Get Auth Token (Josys)
     // -----------------------------
-    const authRes = await fetch(
-      'https://developer.josys.it/api/v1/oauth/tokens',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify({
-          grant_type: 'client_credentials',
-          api_user_key: "431fbec66bd254f7",
-          api_user_secret: "d11891D41285@D68a3746A1BD7fAA7cb"
-        })
-      }
-    );
+   const authRes = await fetch(
+  'https://developer.josys.it/api/v1/oauth/tokens',
+  {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    body: JSON.stringify({
+      grant_type: 'client_credentials',
+      api_user_key: process.env.JOSYS_API_KEY || "431fbec66bd254f7",
+      api_user_secret: process.env.JOSYS_API_SECRET || "d11891D41285@D68a3746A1BD7fAA7cb"
+    })
+  }
+);
 
-    const authData = await authRes.json();
-    const token = authData.access_token;
+// 🔥 ADD THIS
+const rawText = await authRes.text();
+console.log("AUTH STATUS:", authRes.status);
+console.log("AUTH RESPONSE RAW:", rawText);
 
-    if (!token) {
-      throw new Error('Failed to get auth token');
-    }
+// THEN parse safely
+let authData;
+try {
+  authData = JSON.parse(rawText);
+} catch (e) {
+  throw new Error("Auth response is not JSON");
+}
+
+const token = authData.access_token;
+
+if (!token) {
+  throw new Error("No access_token in response");
+}
 
     // -----------------------------
     // 2. Loop through users (pagination)
